@@ -206,6 +206,103 @@ RUNNINGHUB_DEFAULT_IMAGE_MODELS = [
     "seedream-v5-lite/text-to-image",
     "seedream-v5-lite/image-to-image",
 ]
+RUNNINGHUB_DEFAULT_APPS = [
+    {
+        "id": "2058517022748798977",
+        "appId": "2058517022748798977",
+        "title": "2511-风格迁移",
+        "note": "",
+        "thumbnail": "",
+        "enabled": True,
+        "fields": [
+            {
+                "id": "100::image",
+                "nodeId": "100",
+                "fieldName": "image",
+                "fieldValue": "pasted/57ef7dc980b6446bca366caaf3f94eb12b22b23f78aa30e294b39cabd7d0187b.png",
+                "fieldType": "IMAGE",
+                "label": "image",
+                "enabled": True,
+                "sourceFromUpstream": True,
+                "group": "AI 应用参数",
+                "note": "image",
+                "options": [],
+                "random_enabled": False,
+                "min": "",
+                "max": "",
+                "step": "",
+                "imageOrder": 0,
+                "required": False,
+            },
+            {
+                "id": "112::image",
+                "nodeId": "112",
+                "fieldName": "image",
+                "fieldValue": "8cff63ee4b3e0285ca85ab90a52e26746df84ed0dec0be9d76c679cbb62a247d.png",
+                "fieldType": "IMAGE",
+                "label": "image",
+                "enabled": True,
+                "sourceFromUpstream": True,
+                "group": "AI 应用参数",
+                "note": "image",
+                "options": [],
+                "random_enabled": False,
+                "min": "",
+                "max": "",
+                "step": "",
+                "imageOrder": 0,
+                "required": False,
+            },
+            {
+                "id": "14::seed",
+                "nodeId": "14",
+                "fieldName": "seed",
+                "fieldValue": "554049736557817",
+                "fieldType": "INT",
+                "label": "seed",
+                "enabled": True,
+                "sourceFromUpstream": True,
+                "group": "AI 应用参数",
+                "note": "seed",
+                "options": [],
+                "random_enabled": True,
+                "min": "",
+                "max": "",
+                "step": "",
+                "imageOrder": 0,
+                "required": False,
+            },
+        ],
+    },
+    {
+        "id": "1997622492837646338",
+        "appId": "1997622492837646338",
+        "title": "2511-光线迁移",
+        "note": "",
+        "thumbnail": "",
+        "enabled": True,
+    },
+]
+RUNNINGHUB_DEFAULT_WORKFLOWS = [
+    {
+        "id": "2058554058318897153",
+        "workflowId": "2058554058318897153",
+        "title": "GPT-Image-2-图片编辑",
+        "note": "",
+        "thumbnail": "",
+        "enabled": True,
+        "optionalImageMode": "prune-workflow",
+    },
+    {
+        "id": "2058541134623891458",
+        "workflowId": "2058541134623891458",
+        "title": "NanoBanana-2-图片编辑",
+        "note": "",
+        "thumbnail": "",
+        "enabled": True,
+        "optionalImageMode": "prune-workflow",
+    },
+]
 
 def ensure_runtime_config_files():
     """首次运行时提前创建配置目录，避免第一次保存 API Key 时才创建目录/文件。"""
@@ -442,8 +539,8 @@ def default_api_providers():
             "video_models": [],
             "ms_loras": [],
             "ms_defaults_version": 0,
-            "rh_apps": [],
-            "rh_workflows": [],
+            "rh_apps": RUNNINGHUB_DEFAULT_APPS,
+            "rh_workflows": RUNNINGHUB_DEFAULT_WORKFLOWS,
         },
     ]
 
@@ -478,8 +575,8 @@ def merge_default_api_providers(providers):
             if not current.get("protocol") or current.get("protocol") == "openai":
                 current["protocol"] = "runninghub"
             current["image_models"] = model_list_from_values([*(current.get("image_models") or []), *RUNNINGHUB_DEFAULT_IMAGE_MODELS])
-            current["rh_apps"] = normalize_runninghub_entries(current.get("rh_apps") or [], "app")
-            current["rh_workflows"] = normalize_runninghub_entries(current.get("rh_workflows") or [], "workflow")
+            current["rh_apps"] = normalize_runninghub_entries([*(current.get("rh_apps") or []), *RUNNINGHUB_DEFAULT_APPS], "app")
+            current["rh_workflows"] = normalize_runninghub_entries([*(current.get("rh_workflows") or []), *RUNNINGHUB_DEFAULT_WORKFLOWS], "workflow")
     return merged
 
 def normalize_model_list(values):
