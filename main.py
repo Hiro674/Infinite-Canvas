@@ -344,6 +344,8 @@ COMFYUI_ADDRESS = COMFYUI_INSTANCES[0]
 
 AI_BASE_URL = os.getenv("COMFLY_BASE_URL", "https://ai.comfly.chat").rstrip("/")
 AI_API_KEY = os.getenv("COMFLY_API_KEY", "")
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+PUBLIC_MEDIA_BASE_URL = os.getenv("PUBLIC_MEDIA_BASE_URL", "").strip().rstrip("/")
 MODELSCOPE_API_KEY = os.getenv("MODELSCOPE_API_KEY", "")
 MODELSCOPE_CHAT_BASE_URL = "https://api-inference.modelscope.cn/v1"
 MODELSCOPE_DEFAULT_IMAGE_MODELS = [
@@ -1498,6 +1500,13 @@ class CanvasVideoRequest(BaseModel):
     return_last_frame: bool = False
     generate_audio: bool = False
 
+class TempShUploadRequest(BaseModel):
+    url: str = ""
+
+class CloudVideoUploadRequest(BaseModel):
+    url: str = ""
+    service: str = "auto"
+
 class RunningHubSubmitRequest(BaseModel):
     webappId: str = ""
     nodeInfoList: List[Dict[str, Any]] = []
@@ -2606,6 +2615,65 @@ def valid_apimart_video_image_input(value: str) -> bool:
     value = value.strip()
     return value.startswith("http://") or value.startswith("https://") or value.startswith("asset://")
 
+def public_base_url() -> str:
+    value = (
+        os.getenv("PUBLIC_MEDIA_BASE_URL") or
+        PUBLIC_MEDIA_BASE_URL or
+        os.getenv("PUBLIC_BASE_URL") or
+        PUBLIC_BASE_URL or
+        ""
+    ).strip().rstrip("/")
+    if value and re.match(r"^https?://", value, re.I):
+        return value
+    return ""
+
+def public_media_url_suffix() -> str:
+    token = str(os.getenv("PUBLIC_MEDIA_TOKEN") or "").strip()
+    return f"?token={urllib.parse.quote(token)}" if token else ""
+
+def local_asset_public_url(value: str) -> str:
+    text = str(value or "").strip()
+    if not text.startswith(("/output/", "/assets/")):
+        return ""
+    if not output_file_from_url(text):
+        return ""
+    base = public_base_url()
+    if not base:
+        return ""
+    return f"{base}{urllib.parse.quote(text, safe='/:?&=%#.-_~')}{public_media_url_suffix()}"
+
+def normalize_apimart_video_reference(value: str) -> str:
+    text = str(value or "").strip()
+    if valid_apimart_video_image_input(text):
+        return text
+    return local_asset_public_url(text)
+
+def apimart_video_reference_error(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "空的视频地址"
+    if text.startswith(("/output/", "/assets/")):
+        if not output_file_from_url(text):
+            return "这是本地画布文件路径，但后端没有找到对应文件，请重新上传视频后再试。"
+        return (
+            "这是本地画布文件，APIMart 无法访问 127.0.0.1/局域网路径；"
+            "请在 API/.env 配置 PUBLIC_MEDIA_BASE_URL 或 PUBLIC_BASE_URL 为可公网访问的媒体地址（例如内网穿透 HTTPS 地址），"
+            "或改用公网 http/https 视频 URL、审核后的 asset:// 地址。"
+        )
+    if text.startswith("data:") or text.startswith("blob:") or text.startswith("file:"):
+        return (
+            "APIMart 的 video_urls 不支持 data/blob/file 地址；"
+            "请改用公网 http/https 视频 URL，或审核后的 asset:// 地址。"
+        )
+    return "APIMart 的 video_urls 只支持公网 http/https URL 或 asset:// 私域素材 URL。"
+
+def apimart_video_duration(duration) -> int:
+    try:
+        value = int(duration)
+    except Exception:
+        value = 5
+    return max(4, min(15, value))
+
 def is_apimart_veo31_model(model: str) -> bool:
     return str(model or "").strip().lower().startswith("veo3.1")
 
@@ -2708,6 +2776,10 @@ def apimart_upload_payload_from_bytes(data: bytes, mime: str, name_hint: str = "
             quality -= 8
     raise ValueError("data URL 图片超过 10MB，且压缩后仍无法满足 APIMart 限制")
 
+def apimart_upload_raw_file_payload(path: str):
+    with open(path, "rb") as fh:
+        return os.path.basename(path), fh.read(), content_type_for_path(path)
+
 async def upload_image_for_apimart(client, provider, ref_url: str) -> str:
     """把本地图片转成上游可接受的输入。
     按 APIMart 文档上传到 /v1/uploads/images，拿到可用于生成接口的 http/https URL。
@@ -2771,6 +2843,132 @@ async def upload_image_for_apimart(client, provider, ref_url: str) -> str:
             print(f"APIMart 文件上传异常: {e}")
             return f"ERR:上传异常 {e}"
     return "ERR:不支持的图片来源（仅支持 http/https/asset/data 或本地 /output/ /assets/ 路径）"
+
+async def upload_video_for_apimart(client, provider, ref_url: str) -> str:
+    """尽力把本地参考视频转换为 APIMart 可接受的 http/https 或 asset:// URL。
+    文档只公开了图片上传；如果视频上传端点不可用，会回退到 PUBLIC_BASE_URL 方案。"""
+    ref_url = str(ref_url or "").strip()
+    if not ref_url:
+        return "ERR:空地址"
+    if valid_apimart_video_image_input(ref_url):
+        return ref_url
+    public_url = local_asset_public_url(ref_url)
+    if public_url:
+        return public_url
+    if not (ref_url.startswith("/output/") or ref_url.startswith("/assets/")):
+        return f"ERR:{apimart_video_reference_error(ref_url)}"
+    path = output_file_from_url(ref_url)
+    if not path:
+        return "ERR:本地视频不存在或已被删除"
+    ct = content_type_for_path(path)
+    if not ct.startswith("video/"):
+        return "ERR:参考视频不是可识别的视频文件"
+    if str(os.getenv("APIMART_TRY_VIDEO_UPLOAD") or "").strip().lower() not in {"1", "true", "yes", "on"}:
+        return f"ERR:{apimart_video_reference_error(ref_url)}"
+    base_url = video_api_root(provider)
+    filename, content, content_type = apimart_upload_raw_file_payload(path)
+    upload_paths = ("/v1/uploads/videos", "/v1/uploads/files", "/v1/uploads/images")
+    last_error = ""
+    for upload_path in upload_paths:
+        upload_url = f"{base_url}{upload_path}"
+        try:
+            files = {"file": (filename, content, content_type)}
+            resp = await client.post(upload_url, headers=api_headers(json_body=False, provider=provider), files=files, timeout=180)
+            if resp.status_code in (200, 201):
+                rj = resp.json()
+                url = extract_apimart_asset_url(rj)
+                if valid_apimart_video_image_input(url):
+                    return url
+                last_error = "上传响应未包含可用 URL"
+                print(f"APIMart 视频上传返回中未找到可用 asset/url ({upload_path}): {str(rj)[:300]}")
+                continue
+            last_error = f"{upload_path} 返回 {resp.status_code}: {resp.text[:200]}"
+            print(f"APIMart 视频上传失败 {last_error}")
+        except Exception as e:
+            last_error = f"{upload_path} 异常：{e}"
+            print(f"APIMart 视频上传异常: {last_error}")
+    return f"ERR:APIMart 未提供可用的视频文件上传入口（{last_error}）。请配置 PUBLIC_BASE_URL，或使用公网 http/https / asset:// 视频地址。"
+
+def local_video_path_for_cloud_upload(ref_url: str) -> str:
+    ref_url = str(ref_url or "").strip()
+    if not ref_url:
+        raise HTTPException(status_code=400, detail="没有可上传的视频")
+    if ref_url.startswith("http://") or ref_url.startswith("https://"):
+        return ""
+    if not (ref_url.startswith("/output/") or ref_url.startswith("/assets/")):
+        raise HTTPException(status_code=400, detail="云端上传只支持画布里的本地视频文件")
+    path = output_file_from_url(ref_url)
+    if not path:
+        raise HTTPException(status_code=404, detail="本地视频不存在或已被删除")
+    ct = content_type_for_path(path)
+    if not ct.startswith("video/"):
+        raise HTTPException(status_code=400, detail="请选择视频文件再上传云端")
+    max_bytes = int(os.getenv("TEMP_SH_MAX_BYTES", str(4 * 1024 * 1024 * 1024)))
+    size = os.path.getsize(path)
+    if size > max_bytes:
+        raise HTTPException(status_code=400, detail=f"视频超过云端上传大小限制：{size} bytes")
+    return path
+
+async def upload_video_to_litterbox(path: str, source_url: str) -> Dict[str, str]:
+    upload_url = os.getenv("LITTERBOX_UPLOAD_URL", "https://litterbox.catbox.moe/resources/internals/api.php").strip() or "https://litterbox.catbox.moe/resources/internals/api.php"
+    time_value = os.getenv("LITTERBOX_TIME", "72h").strip() or "72h"
+    ct = content_type_for_path(path)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=20.0, read=600.0, write=600.0, pool=20.0), follow_redirects=True) as client:
+            with open(path, "rb") as fh:
+                files = {"fileToUpload": (os.path.basename(path), fh, ct)}
+                data = {"reqtype": "fileupload", "time": time_value}
+                response = await client.post(upload_url, data=data, files=files)
+        if not response.is_success:
+            raise HTTPException(status_code=response.status_code, detail=f"Litterbox 上传失败：{response.text[:300]}")
+        direct_url = response.text.strip().splitlines()[0].strip()
+        if not re.match(r"^https?://", direct_url, re.I):
+            raise HTTPException(status_code=502, detail=f"Litterbox 返回了无法识别的链接：{response.text[:300]}")
+        return {"url": direct_url, "source": source_url, "name": os.path.basename(path), "expires": time_value, "service": "litterbox"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Litterbox 上传异常：{exc}") from exc
+
+async def upload_video_to_temp_sh(path: str, source_url: str) -> Dict[str, str]:
+    upload_url = os.getenv("TEMP_SH_UPLOAD_URL", "https://temp.sh/upload").strip() or "https://temp.sh/upload"
+    ct = content_type_for_path(path)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=20.0, read=600.0, write=600.0, pool=20.0), follow_redirects=True) as client:
+            with open(path, "rb") as fh:
+                files = {"file": (os.path.basename(path), fh, ct)}
+                response = await client.post(upload_url, files=files)
+        if not response.is_success:
+            raise HTTPException(status_code=response.status_code, detail=f"Temp.sh 上传失败：{response.text[:300]}")
+        direct_url = response.text.strip().splitlines()[0].strip()
+        if not re.match(r"^https?://", direct_url, re.I):
+            raise HTTPException(status_code=502, detail=f"Temp.sh 返回了无法识别的链接：{response.text[:300]}")
+        return {"url": direct_url, "source": source_url, "name": os.path.basename(path), "expires": "3 days", "service": "temp.sh"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Temp.sh 上传异常：{exc}") from exc
+
+async def upload_local_video_to_cloud(ref_url: str, service: str = "auto") -> Dict[str, str]:
+    ref_url = str(ref_url or "").strip()
+    if ref_url.startswith("http://") or ref_url.startswith("https://"):
+        return {"url": ref_url, "source": ref_url, "service": "existing"}
+    path = local_video_path_for_cloud_upload(ref_url)
+    service = str(service or os.getenv("CLOUD_VIDEO_UPLOAD_SERVICE", "auto") or "auto").strip().lower()
+    if service in {"litterbox", "catbox"}:
+        return await upload_video_to_litterbox(path, ref_url)
+    if service in {"temp", "temp.sh", "tempsh"}:
+        return await upload_video_to_temp_sh(path, ref_url)
+    errors = []
+    for name, func in (("litterbox", upload_video_to_litterbox), ("temp.sh", upload_video_to_temp_sh)):
+        try:
+            return await func(path, ref_url)
+        except HTTPException as exc:
+            errors.append(f"{name}: {exc.detail}")
+    raise HTTPException(status_code=502, detail="云端上传失败：" + "；".join(errors))
+
+async def upload_local_video_to_temp_sh(ref_url: str) -> Dict[str, str]:
+    return await upload_local_video_to_cloud(ref_url, "auto")
 
 async def save_ai_image_to_output(image_data, prefix="online_", category="output"):
     filename = f"{prefix}{uuid.uuid4().hex[:10]}.png"
@@ -3743,6 +3941,16 @@ async def upload_ai_reference(files: List[UploadFile] = File(...)):
         uploaded.append({"url": output_url_for(filename, "input"), "name": file.filename or filename, "kind": kind})
     return {"files": uploaded}
 
+@app.post("/api/temp-sh/upload")
+async def temp_sh_upload(payload: TempShUploadRequest, request: Request):
+    ensure_same_origin_request(request)
+    return await upload_local_video_to_cloud(payload.url, "auto")
+
+@app.post("/api/cloud-video/upload")
+async def cloud_video_upload(payload: CloudVideoUploadRequest, request: Request):
+    ensure_same_origin_request(request)
+    return await upload_local_video_to_cloud(payload.url, payload.service)
+
 @app.post("/api/ai/import-local-image")
 async def import_local_ai_reference(payload: LocalImageImportRequest, request: Request):
     ensure_same_origin_request(request)
@@ -4606,6 +4814,25 @@ async def canvas_video(payload: CanvasVideoRequest):
                 # APIMart 只接受 http/https 或 asset:// URL，先上传本地图片取回网络 URL
                 image_with_roles = []
                 invalid_images = []  # 每项为 (原始 URL, 失败原因)
+                video_payload = []
+                invalid_videos = []
+                for ref_url in payload.videos[:3]:
+                    ref_url = str(ref_url or "").strip()
+                    if not ref_url:
+                        continue
+                    normalized_video_url = await upload_video_for_apimart(client, provider, ref_url)
+                    if valid_apimart_video_image_input(normalized_video_url):
+                        video_payload.append(normalized_video_url)
+                    else:
+                        reason = normalized_video_url[4:] if isinstance(normalized_video_url, str) and normalized_video_url.startswith("ERR:") else apimart_video_reference_error(ref_url)
+                        invalid_videos.append((ref_url, reason))
+                if invalid_videos:
+                    first_url, first_reason = invalid_videos[0]
+                    sample = invalid_video_image_preview(first_url)
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"输入视频无法转换为 APIMart 支持的格式：{sample}\n原因：{first_reason}"
+                    )
                 apimart_model = apimart_veo31_model(requested_model) if is_veo31 else ""
                 if apimart_model == "veo3.1-lite" and payload.images:
                     raise HTTPException(status_code=400, detail="veo3.1-lite 不支持图片输入，请改用 veo3.1-fast 或 veo3.1-quality。")
@@ -4661,16 +4888,18 @@ async def canvas_video(payload: CanvasVideoRequest):
                     body = {
                         "prompt": payload.prompt,
                         "model": selected_model(payload.model, "doubao-seedance-2.0"),
-                        "duration": payload.duration,
+                        "duration": apimart_video_duration(payload.duration),
                         "size": apimart_video_size(payload.aspect_ratio or payload.size),
                         "resolution": payload.resolution or "480p",
                     }
+                    if image_with_roles and video_payload:
+                        raise HTTPException(status_code=400, detail="APIMart Seedance 的 image_with_roles 不能和 video_urls 同时使用，请只保留图片首尾帧或参考视频其中一种。")
                     if image_with_roles:
                         body["image_with_roles"] = image_with_roles
                     elif image_payload:
                         body["image_urls"] = image_payload[:9]
-                    if payload.videos:
-                        body["video_urls"] = [v for v in payload.videos if v][:3]
+                    if video_payload:
+                        body["video_urls"] = video_payload
                     if payload.seed is not None:
                         body["seed"] = payload.seed
                     if payload.return_last_frame:
