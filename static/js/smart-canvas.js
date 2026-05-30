@@ -252,6 +252,7 @@ let panoramaState = {
     camera:null,
     sphere:null,
     texture:null,
+    threeLoadPromise:null,
     image:null,
     ctx:null,
     animationId:0,
@@ -5924,50 +5925,93 @@ function panoramaFallbackSource(){
     const image = currentEditImage().image || {};
     return image?.url ? proxiedMediaUrl(image) : '';
 }
+function isLikelyPanoramaImage(node, image, naturalW=0, naturalH=0){
+    if(mediaKindForItem(image || {}) !== 'image') return false;
+    const text = [
+        image?.name,
+        image?.title,
+        node?.title,
+        node?.runPrompt,
+        node?.runModelPrompt,
+        node?.promptDraftText,
+        node?.runSettings?.ratio,
+        node?.runSettings?.msRatio,
+        node?.runSettings?.size,
+        node?.runSettings?.customSize
+    ].filter(Boolean).join(' ');
+    if(/(?:360|全景|环景|panorama|equirect|spherical|vr\b)/i.test(text)) return true;
+    const w = Number(naturalW || image?.natural_w || image?.width || image?.w || 0);
+    const h = Number(naturalH || image?.natural_h || image?.height || image?.h || 0);
+    if(!(w > 0 && h > 0)) return false;
+    const aspect = w / h;
+    return aspect >= 1.9 && aspect <= 2.1;
+}
 async function ensurePanoramaRenderer(){
     const canvas = document.getElementById('panoramaCanvas');
     if(!canvas) return false;
-    panoramaState.ctx = panoramaState.ctx || canvas.getContext('2d');
-    return !!panoramaState.ctx;
+    if(!panoramaState.three){
+        panoramaState.threeLoadPromise = panoramaState.threeLoadPromise || import('/static/vendor/js/three-0.160.0.module.js?v=2026.05.30');
+        panoramaState.three = await panoramaState.threeLoadPromise;
+    }
+    const THREE = panoramaState.three;
+    if(!panoramaState.renderer){
+        panoramaState.renderer = new THREE.WebGLRenderer({
+            canvas,
+            antialias:true,
+            alpha:false,
+            preserveDrawingBuffer:true
+        });
+        panoramaState.renderer.setPixelRatio(1);
+        panoramaState.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    }
+    if(!panoramaState.scene){
+        panoramaState.scene = new THREE.Scene();
+        panoramaState.camera = new THREE.PerspectiveCamera(panoramaState.fov, 16 / 9, 1, 1200);
+        const geometry = new THREE.SphereGeometry(500, 96, 64);
+        geometry.scale(-1, 1, 1);
+        const material = new THREE.MeshBasicMaterial({color:0xffffff});
+        panoramaState.sphere = new THREE.Mesh(geometry, material);
+        panoramaState.scene.add(panoramaState.sphere);
+    }
+    return Boolean(panoramaState.renderer && panoramaState.scene && panoramaState.camera && panoramaState.sphere);
+}
+function applyPanoramaTexture(img){
+    const THREE = panoramaState.three;
+    if(!THREE || !panoramaState.sphere || !img?.naturalWidth || !img?.naturalHeight) return false;
+    if(panoramaState.texture){
+        panoramaState.texture.dispose?.();
+        panoramaState.texture = null;
+    }
+    const texture = new THREE.Texture(img);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.needsUpdate = true;
+    panoramaState.texture = texture;
+    panoramaState.sphere.material.map = texture;
+    panoramaState.sphere.material.needsUpdate = true;
+    return true;
 }
 function drawPanoramaFrame(){
     const canvas = document.getElementById('panoramaCanvas');
-    const ctx = panoramaState.ctx || canvas?.getContext?.('2d');
     const img = panoramaState.image;
-    if(!panoramaState.enabled || !canvas || !ctx || !img?.naturalWidth || !img?.naturalHeight) return false;
-    panoramaState.ctx = ctx;
-    const cw = Math.max(1, canvas.width);
-    const ch = Math.max(1, canvas.height);
-    const iw = img.naturalWidth;
-    const ih = img.naturalHeight;
-    const aspect = cw / Math.max(1, ch);
-    let viewW = Math.max(1, iw * (Math.max(35, Math.min(100, panoramaState.fov)) / 180));
-    let viewH = viewW / Math.max(0.1, aspect);
-    if(viewH > ih){
-        viewH = ih;
-        viewW = viewH * aspect;
-    }
-    const yaw = ((panoramaState.yaw % 360) + 360) % 360;
-    const centerX = ((yaw + 180) % 360) / 360 * iw;
-    const centerY = ih / 2 - (Math.max(-85, Math.min(85, panoramaState.pitch)) / 180) * ih;
-    let sx = centerX - viewW / 2;
-    const sy = Math.max(0, Math.min(ih - viewH, centerY - viewH / 2));
-    ctx.clearRect(0, 0, cw, ch);
-    ctx.fillStyle = '#020617';
-    ctx.fillRect(0, 0, cw, ch);
-    if(viewW >= iw){
-        ctx.drawImage(img, 0, sy, iw, viewH, 0, 0, cw, ch);
-    } else {
-        while(sx < 0) sx += iw;
-        while(sx >= iw) sx -= iw;
-        const firstW = Math.min(viewW, iw - sx);
-        const firstDw = cw * (firstW / viewW);
-        ctx.drawImage(img, sx, sy, firstW, viewH, 0, 0, firstDw, ch);
-        if(firstW < viewW){
-            const restW = viewW - firstW;
-            ctx.drawImage(img, 0, sy, restW, viewH, firstDw, 0, cw - firstDw, ch);
-        }
-    }
+    const {renderer, scene, camera, sphere, three:THREE} = panoramaState;
+    if(!panoramaState.enabled || !canvas || !renderer || !scene || !camera || !sphere || !THREE || !img?.naturalWidth || !img?.naturalHeight) return false;
+    const width = Math.max(1, canvas.width);
+    const height = Math.max(1, canvas.height);
+    renderer.setSize(width, height, false);
+    camera.fov = Math.max(35, Math.min(100, panoramaState.fov));
+    camera.aspect = width / Math.max(1, height);
+    camera.updateProjectionMatrix();
+    const pitch = Math.max(-85, Math.min(85, panoramaState.pitch));
+    const phi = THREE.MathUtils.degToRad(90 - pitch);
+    const theta = THREE.MathUtils.degToRad(panoramaState.yaw);
+    const target = new THREE.Vector3(
+        500 * Math.sin(phi) * Math.cos(theta),
+        500 * Math.cos(phi),
+        500 * Math.sin(phi) * Math.sin(theta)
+    );
+    camera.position.set(0, 0, 0);
+    camera.lookAt(target);
+    renderer.render(scene, camera);
     return true;
 }
 function renderPanoramaFrame(){
@@ -6015,7 +6059,14 @@ function resizePanoramaViewer(){
     }
 }
 function disposePanoramaTexture(){
-    panoramaState.texture = null;
+    if(panoramaState.texture){
+        panoramaState.texture.dispose?.();
+        panoramaState.texture = null;
+    }
+    if(panoramaState.sphere?.material){
+        panoramaState.sphere.material.map = null;
+        panoramaState.sphere.material.needsUpdate = true;
+    }
     panoramaState.image = null;
 }
 async function loadPanoramaTexture(src, allowFallback=true){
@@ -6023,7 +6074,13 @@ async function loadPanoramaTexture(src, allowFallback=true){
     const token = ++panoramaState.loadToken;
     const stage = document.getElementById('panoramaStage');
     stage?.classList.remove('ready');
-    const ready = await ensurePanoramaRenderer();
+    let ready = false;
+    try {
+        ready = await ensurePanoramaRenderer();
+    } catch(e) {
+        console.warn('panorama renderer init failed', e);
+        ready = false;
+    }
     if(!ready){
         stage?.classList.add('ready');
         toast(tr('smart.panoramaLoadFailed'));
@@ -6038,6 +6095,11 @@ async function loadPanoramaTexture(src, allowFallback=true){
             return;
         }
         disposePanoramaTexture();
+        if(!applyPanoramaTexture(img)){
+            stage?.classList.add('ready');
+            toast(tr('smart.panoramaLoadFailed'));
+            return;
+        }
         panoramaState.image = img;
         panoramaState.loadedSrc = src;
         stage?.classList.add('ready');
@@ -7074,7 +7136,10 @@ function openImageEditor(nodeId, imageIndex=0){
         updateZoomLabel(); resizeEditDrawCanvas(); resetEditDrawingHistory(); clearEditDrawing(true); resetCropBox();
         if(!imageEditModeTouched) setImageEditMode('preview');
         else refreshComparePanel();
-        updatePreviewMetaHint();
+        if(imageEditMode === 'preview' && isLikelyPanoramaImage(node, targetImage || image, img.naturalWidth, img.naturalHeight)){
+            setPanoramaEnabled(true);
+        }
+        if(!panoramaState.enabled) updatePreviewMetaHint();
         syncImageEditOverflow(); refreshIcons();
     };
     img.onerror = () => {
