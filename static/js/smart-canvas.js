@@ -290,7 +290,7 @@ let settings = {
     provider_id:'',
     model:'',
     ratio:'square',
-    resolution:'1k',
+    resolution:'auto',
     customRatio:'',
     customRatioWidth:'',
     customRatioHeight:'',
@@ -369,10 +369,23 @@ function refreshIcons(){ if(window.lucide) lucide.createIcons(); }
 function uid(prefix){ return `${prefix}_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`; }
 function escapeHtml(str){ return String(str == null ? '' : str).replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s])); }
 const escapeAttr = escapeHtml;
+function smartOriginalMediaUrl(itemOrUrl){
+    const raw = typeof itemOrUrl === 'string' ? itemOrUrl : (itemOrUrl?.url || '');
+    const text = String(raw || '');
+    if(!text) return '';
+    try {
+        const parsed = new URL(text, window.location.origin);
+        if(parsed.pathname === '/api/media-preview'){
+            const original = parsed.searchParams.get('url') || '';
+            return original || text;
+        }
+    } catch(e) {}
+    return text;
+}
 function smartMediaPreviewUrl(itemOrUrl, size=512){
-    const url = typeof itemOrUrl === 'string' ? itemOrUrl : (itemOrUrl?.url || '');
-    const displayUrl = displayMediaUrl(itemOrUrl);
-    const raw = String(url || '');
+    const raw = smartOriginalMediaUrl(itemOrUrl);
+    const displayItem = typeof itemOrUrl === 'object' && itemOrUrl ? {...itemOrUrl, url:raw} : raw;
+    const displayUrl = displayMediaUrl(displayItem);
     if(!raw || raw.startsWith('data:') || raw.startsWith('blob:')) return displayUrl;
     if(!raw.startsWith('/output/') && !raw.startsWith('/assets/')) return displayUrl;
     if(!/\.(png|jpe?g|webp|gif|bmp|avif|tiff?|mp4|webm|mov|m4v|avi|mkv)(\?|#|$)/i.test(raw)) return displayUrl;
@@ -380,12 +393,12 @@ function smartMediaPreviewUrl(itemOrUrl, size=512){
     return `/api/media-preview?w=${width}&url=${encodeURIComponent(raw)}`;
 }
 function smartPreviewImgHtml(itemOrUrl, size=512, attrs=''){
-    const original = typeof itemOrUrl === 'string' ? itemOrUrl : (itemOrUrl?.url || '');
+    const original = smartOriginalMediaUrl(itemOrUrl);
     const preview = smartMediaPreviewUrl(itemOrUrl, size);
     return `<img src="${escapeHtml(preview)}" data-preview-src="${escapeAttr(preview)}" data-original-src="${escapeAttr(original)}"${attrs ? ` ${attrs}` : ''}>`;
 }
 function loadSmartOriginalImageDimensions(url){
-    const src = displayMediaUrl({url:url || ''});
+    const src = displayMediaUrl({url:smartOriginalMediaUrl(url)});
     if(!src || /^data:/i.test(src) || /^blob:/i.test(src)) return Promise.resolve(null);
     return new Promise(resolve => {
         const img = new Image();
@@ -395,23 +408,34 @@ function loadSmartOriginalImageDimensions(url){
     });
 }
 function smartVideoPreviewHtml(itemOrUrl, size=512, attrs=''){
-    const original = typeof itemOrUrl === 'string' ? itemOrUrl : (itemOrUrl?.url || '');
+    const original = smartOriginalMediaUrl(itemOrUrl);
     const preview = smartMediaPreviewUrl(itemOrUrl, size);
     return `<img src="${escapeHtml(preview)}" data-preview-src="${escapeAttr(preview)}" data-original-src="${escapeAttr(original)}" data-url="${escapeAttr(original)}" data-preview-kind="video"${attrs ? ` ${attrs}` : ''}>`;
 }
 function smartVideoFallbackHtml(url, attrs=''){
-    const safe = escapeHtml(url || '');
-    return `<video src="${safe}" data-url="${safe}" muted preload="metadata" playsinline disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"${attrs ? ` ${attrs}` : ''}></video>`;
+    const original = smartOriginalMediaUrl(url);
+    const src = displayMediaUrl({url:original});
+    return `<video src="${escapeHtml(src)}" data-url="${escapeAttr(original)}" muted preload="metadata" playsinline disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"${attrs ? ` ${attrs}` : ''}></video>`;
 }
 function smartVideoPlayerHtml(url, attrs=''){
-    const safe = escapeHtml(displayMediaUrl({url:url || ''}));
-    return `<video src="${safe}" data-url="${escapeAttr(url || '')}" data-inline-video-active="1" controls autoplay playsinline preload="metadata" disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"${attrs ? ` ${attrs}` : ''}></video>`;
+    const original = smartOriginalMediaUrl(url);
+    const safe = escapeHtml(displayMediaUrl({url:original}));
+    return `<video src="${safe}" data-url="${escapeAttr(original)}" data-inline-video-active="1" controls autoplay playsinline preload="metadata" disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"${attrs ? ` ${attrs}` : ''}></video>`;
 }
 function smartActivateVideoPreview(target){
     const root = target?.closest?.('.media-video-card,.video-thumb,.image-wrap,.thumb-item') || target?.parentElement || null;
     const img = target?.matches?.('img[data-preview-kind="video"]') ? target : root?.querySelector?.('img[data-preview-kind="video"]');
-    if(!img) return false;
-    const original = img.dataset.originalSrc || img.dataset.url || '';
+    if(!img){
+        const fallback = target?.matches?.('video[data-url]') ? target : root?.querySelector?.('video[data-url]');
+        if(fallback){
+            fallback.controls = true;
+            fallback.muted = false;
+            fallback.play?.().catch(() => {});
+            return true;
+        }
+        return false;
+    }
+    const original = smartOriginalMediaUrl(img.dataset.originalSrc || img.dataset.url || img.getAttribute('src') || '');
     if(!original) return false;
     const itemEl = target?.closest?.('[data-image-index]') || root?.closest?.('[data-image-index]') || root;
     const nodeEl = target?.closest?.('.image-node') || root?.closest?.('.image-node');
@@ -476,6 +500,21 @@ function normalizeSmartVideoModeSettings(target, preferMultimodal=false){
 }
 function isApiLikeEngine(engine){
     return ['api', 'volcengine'].includes(String(engine || '').toLowerCase());
+}
+function isGptImageAutoSizeModel(model){
+    const raw = String(model || '').trim().toLowerCase();
+    const normalized = raw.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    const compact = raw.replace(/[^a-z0-9]+/g, '');
+    return normalized === 'gpt-image-2'
+        || normalized.startsWith('gpt-image-2-')
+        || normalized.endsWith('-gpt-image-2')
+        || normalized.includes('-gpt-image-2-')
+        || compact === 'gptimage2'
+        || compact.startsWith('gptimage2')
+        || compact.endsWith('gptimage2');
+}
+function defaultSmartApiResolution(model){
+    return isGptImageAutoSizeModel(model) ? 'auto' : '1k';
 }
 function mediaItemForStorage(item){
     if(!item || typeof item !== 'object') return item;
@@ -921,7 +960,7 @@ function persistActiveSmartSettings(){
 }
 function backToCanvasList(){ savePromptDraftForCurrent(); window.location.href = '/static/canvas.html?v=2026.05.22.1'; }
 function promptPlainText(){
-    return promptInput.innerText.replace(/\u00a0/g, ' ').trim();
+    return originalPromptTextFromParts(collectPromptParts());
 }
 function setPromptInputLocked(locked){
     promptInput.dataset.promptLocked = locked ? '1' : '0';
@@ -982,6 +1021,7 @@ function syncSelectionUi(){
             item.classList.toggle('image-selected', selectedImage.nodeId === id && selectedImage.index === index);
         });
     });
+    syncRunButtonState();
 }
 function isNodeSelected(id){
     return selectedId === id || selectedIds.includes(id);
@@ -1444,6 +1484,12 @@ function rhWorkflowJsonFromSources(...sources){
 function rhCurrentKind(sourceSettings=settings){
     return selectedRunningHubRef(sourceSettings)?.kind || 'app';
 }
+function rhUsableFields(fields){
+    const list = Array.isArray(fields) ? fields : [];
+    if(!list.length) return [];
+    const enabled = list.filter(f => f.enabled === true);
+    return enabled.length ? enabled : list;
+}
 function rhActiveFields(sourceSettings=settings){
     const ref = selectedRunningHubRef(sourceSettings);
     let fields = rhEntryFields(ref?.entry);
@@ -1451,7 +1497,7 @@ function rhActiveFields(sourceSettings=settings){
         const cached = runningHubWorkflowCache[ref.id];
         if(Array.isArray(cached?.fields) && cached.fields.length) fields = cached.fields;
     }
-    fields = fields.filter(f => f.enabled === true);
+    fields = rhUsableFields(fields);
     return sortRunningHubFields(fields);
 }
 function runningHubRunNeedsPrompt(sourceSettings=settings){
@@ -1606,6 +1652,11 @@ function sanitizeSmartApiSelection(target=settings){
         const models = providerImageModels(target.provider_id);
         if(models.length && !models.includes(target.model)) target.model = models[0] || '';
     }
+    if((target.engine || 'api') === 'api' && (target.apiKind || 'image') !== 'video'){
+        const allowAuto = isGptImageAutoSizeModel(target.model);
+        if(!target.resolution) target.resolution = allowAuto ? 'auto' : '1k';
+        if(!allowAuto && target.resolution === 'auto') target.resolution = '1k';
+    }
     if(target.videoProvider){
         const models = providerVideoModels(target.videoProvider);
         if(models.length && !models.includes(target.videoModel)) target.videoModel = models[0] || '';
@@ -1748,6 +1799,7 @@ function parseRatioValue(value){
     return w > 0 && h > 0 ? w / h : 0;
 }
 function apiImageSize(ratioValue, resolutionValue, customRatioValue='', customSizeValue=''){
+    if(resolutionValue === 'auto') return 'auto';
     if(resolutionValue === 'custom') return String(customSizeValue || '').trim();
     const resolutionKey = resolutionValue || '1k';
     if(ratioValue === 'custom' || ratioValue === 'source'){
@@ -1768,6 +1820,10 @@ function apiImageSize(ratioValue, resolutionValue, customRatioValue='', customSi
 function normalizeApiSizeSettings(prefix=''){
     const ratioKey = prefix ? `${prefix}Ratio` : 'ratio';
     const resKey = prefix ? `${prefix}Resolution` : 'resolution';
+    const allowAuto = !prefix && settings.engine === 'api' && settings.apiKind !== 'video' && isGptImageAutoSizeModel(settings.model);
+    if(!settings[resKey]) settings[resKey] = allowAuto ? 'auto' : '1k';
+    if(!allowAuto && settings[resKey] === 'auto') settings[resKey] = '1k';
+    if(settings[resKey] === 'auto' && !settings[ratioKey]) settings[ratioKey] = 'square';
 }
 async function ensureComfyWorkflow(name){
     if(!name) return null;
@@ -1812,16 +1868,18 @@ function renderApiParams(){
     const providers = imageProviders();
     if(!settings.provider_id || !providers.some(p => p.id === settings.provider_id)) settings.provider_id = providers[0]?.id || '';
     const models = filterJimengImageModels(providerImageModels(settings.provider_id));
+    const previousModel = settings.model;
     if(!settings.model || !models.includes(settings.model)) settings.model = models[0] || '';
+    if(previousModel !== settings.model && settings.resolution !== 'custom') settings.resolution = defaultSmartApiResolution(settings.model);
     normalizeApiSizeSettings('');
     const outpaintLocked = settings.outpaintResolutionLocked === true;
     dynamicParams.innerHTML = `
         ${renderProviderControl(providers)}
         ${renderModelControl(models)}
         ${renderResolutionControl('')}
-        ${outpaintLocked ? '' : renderRatioControl('', true)}
+        ${outpaintLocked || settings.resolution === 'auto' ? '' : renderRatioControl('', true)}
         ${outpaintLocked ? '' : renderInlineCustomSizeFields('')}
-        ${outpaintLocked ? '' : renderInlineCustomRatioFields('')}
+        ${outpaintLocked || settings.resolution === 'auto' ? '' : renderInlineCustomRatioFields('')}
         ${renderQualityControl()}
         ${renderCountVisualControl()}
     `;
@@ -2047,10 +2105,11 @@ function renderSizeControls(prefix='', includeSource=false){
         ...(includeSource ? [['source', tr('canvas.adaptiveRatio') || '适配比例']] : []),
         ['custom', tr('canvas.custom') || '自定义']
     ];
+    const resolutionOptions = (!prefix && settings.engine === 'api') ? ['auto','1k','2k','4k','custom'] : ['1k','2k','4k','custom'];
     return `<select data-param="${resKey}">
-            ${['1k','2k','4k','custom'].map(v => optionHtml(v, v === 'custom' ? (tr('canvas.custom') || '自定义') : v.toUpperCase(), settings[resKey] || '1k')).join('')}
+            ${resolutionOptions.map(v => optionHtml(v, v === 'auto' ? '自动' : (v === 'custom' ? (tr('canvas.custom') || '自定义') : v.toUpperCase()), settings[resKey] || (prefix ? '1k' : defaultSmartApiResolution(settings.model)))).join('')}
         </select>
-        <select data-param="${ratioKey}" ${settings[resKey] === 'custom' ? 'disabled' : ''}>
+        <select data-param="${ratioKey}" ${settings[resKey] === 'custom' || settings[resKey] === 'auto' ? 'disabled' : ''}>
             ${ratios.map(([v,l]) => `<option value="${escapeHtml(v)}" ${v === (settings[ratioKey] || 'square') ? 'selected' : ''}>${escapeHtml(l)}</option>`).join('')}
         </select>`;
 }
@@ -2108,7 +2167,8 @@ function applySourceRatioToSettings(prefix=''){
 function resolutionLabel(prefix=''){
     const resKey = prefix ? `${prefix}Resolution` : 'resolution';
     const sizeKey = prefix ? `${prefix}CustomSize` : 'customSize';
-    const value = settings[resKey] || '1k';
+    const value = settings[resKey] || ((!prefix && settings.engine === 'api') ? defaultSmartApiResolution(settings.model) : '1k');
+    if(value === 'auto') return '自动';
     return value === 'custom' ? (settings[sizeKey] || tr('smart.custom')) : value.toUpperCase();
 }
 function ratioIconClass(value){
@@ -2203,12 +2263,15 @@ function renderRatioControl(prefix='', includeSource=false){
 }
 function renderResolutionControl(prefix=''){
     const resKey = prefix ? `${prefix}Resolution` : 'resolution';
+    const options = (!prefix && settings.engine === 'api') ? ['auto','1k','2k','4k','custom'] : ['1k','2k','4k','custom'];
+    const current = settings[resKey] || ((!prefix && settings.engine === 'api') ? defaultSmartApiResolution(settings.model) : '1k');
+    const allowAuto = !prefix && settings.engine === 'api' && settings.apiKind !== 'video' && isGptImageAutoSizeModel(settings.model);
     return `<div class="smart-control resolution-control">
         <button class="smart-pill" type="button"><i data-lucide="monitor"></i><span>${escapeHtml(resolutionLabel(prefix))}</span></button>
         <div class="smart-popover compact-popover">
             <div class="smart-popover-title">${escapeHtml(tr('smart.resolution'))}</div>
             <div class="seg-row">
-                ${['1k','2k','4k','custom'].map(value => `<button type="button" class="${value === (settings[resKey] || '1k') ? 'active' : ''}" data-smart-param="${resKey}" data-smart-value="${value}">${value === 'custom' ? escapeHtml(tr('smart.custom')) : value.toUpperCase()}</button>`).join('')}
+                ${options.map(value => `<button type="button" class="${value === current ? 'active' : ''}" data-smart-param="${resKey}" data-smart-value="${value}" ${value === 'auto' && !allowAuto ? 'disabled' : ''}>${value === 'auto' ? '自动' : (value === 'custom' ? escapeHtml(tr('smart.custom')) : value.toUpperCase())}</button>`).join('')}
             </div>
         </div>
     </div>`;
@@ -2741,9 +2804,6 @@ async function rhBuildNodeInfoList(media, sourceSettings=settings, randomValues=
         if(rhFieldRole(field) === 'prompt' && !String(value || '').trim()) value = rhDefaultValue(field);
         if(['image','video','audio'].includes(kind)) value = await rhUploadValueIfNeeded(value, sourceSettings);
         if(['number','slider'].includes(kind) && String(value ?? '').trim() !== '' && !Number.isNaN(Number(value))) value = Number(value);
-        // 只对“单值”字段（下拉/选项等）去换行；prompt / text 这类自由文本必须保留换行，
-        // 否则多行提示词会被截成第一行（例如“一只红猫\n金色的眼睛”只剩“一只红猫”）。
-        if(typeof value === 'string' && !['prompt','text'].includes(rhFieldRole(field)) && /[\r\n]/.test(value)) value = value.split(/\r?\n/).map(s => s.trim()).filter(Boolean)[0] || '';
         result.push({nodeId:field.nodeId, fieldName:field.fieldName, fieldValue:value});
     }
     return result;
@@ -2831,6 +2891,7 @@ function setDynamicSetting(key, value){
     const layoutKeys = new Set(['provider_id','model','resolution','ratio','msgenModel','msCustomModel','msResolution','msRatio','videoProvider','videoModel','videoAspect','videoResolution','comfyMode','comfyWorkflow','quality','count','enhanceUpscaleRes','editUpscaleRes','rhConfigKey','rhPayment','rhInstanceType']);
     settings[key] = numericKeys.has(key) && value !== '' ? Number(value) : value;
     if(key === 'provider_id') settings.model = '';
+    if(key === 'model' && settings.resolution !== 'custom') settings.resolution = defaultSmartApiResolution(settings.model);
     if(key === 'videoProvider') settings.videoModel = '';
     if(key === 'videoMultimodal') settings._videoMultimodalUserSet = true;
     if(key === 'videoMultimodal' && settings.videoMultimodal) settings.videoUseFrameRoles = false;
@@ -3921,6 +3982,10 @@ function mergeSmartImageLists(localImgs, remoteImgs){
 function smartNodeInFlight(node){
     return Boolean(node && (node.running || node.pending || node.queued || node.jimengPending || smartPendingTasks(node).length));
 }
+function syncRunButtonState(node=selectedNode()){
+    if(!runBtn) return;
+    runBtn.disabled = !isSmartImageNode(node) || smartCascadeAnyRunning() || smartNodeInFlight(node);
+}
 function mergeSmartNode(local, remote){
     // 本地正在生成/排队的节点完全以本地为准，只把对方可能多出来的图并进来，绝不被对方旧状态冲掉
     if(smartNodeInFlight(local)){
@@ -4921,7 +4986,7 @@ function updateNodeElementDuringResize(node){
 function isVideoMediaItem(img){
     if(!img) return false;
     if(img.kind === 'video') return true;
-    const url = String(img.url || '').toLowerCase();
+    const url = smartOriginalMediaUrl(img).toLowerCase();
     return /\.(mp4|webm|mov|m4v|avi|mkv)(\?|$)/.test(url);
 }
 function isInlineVideoActive(img){
@@ -4930,13 +4995,13 @@ function isInlineVideoActive(img){
 function isAudioMediaItem(img){
     if(!img) return false;
     if(img.kind === 'audio') return true;
-    const url = String(img.url || '').toLowerCase();
+    const url = smartOriginalMediaUrl(img).toLowerCase();
     return /\.(mp3|wav|m4a|aac|ogg|flac)(\?|$)/.test(url);
 }
 function isTextMediaItem(img){
     if(!img) return false;
     if(img.kind === 'text') return true;
-    const url = String(img.url || '').toLowerCase();
+    const url = smartOriginalMediaUrl(img).toLowerCase();
     return /\.(txt|json|csv|srt|vtt|md)(\?|$)/.test(url);
 }
 function isFileMediaItem(img){
@@ -5221,16 +5286,16 @@ function smartRunTaskLabel(run){
     return s.model || 'API Image';
 }
 function outputUrlLooksVideo(url){
-    return /\.(mp4|webm|mov|m4v|avi|mkv)(\?|$)/.test(String(url || '').toLowerCase());
+    return /\.(mp4|webm|mov|m4v|avi|mkv)(\?|$)/.test(smartOriginalMediaUrl(url).toLowerCase());
 }
 function proxiedMediaUrl(itemOrUrl, name=''){
-    const url = typeof itemOrUrl === 'string' ? itemOrUrl : (itemOrUrl?.url || '');
+    const url = smartOriginalMediaUrl(itemOrUrl);
     if(!url || String(url).startsWith('/assets/') || String(url).startsWith('/output/') || String(url).startsWith('data:') || String(url).startsWith('blob:')) return url;
     const filename = name || (typeof itemOrUrl === 'object' ? (itemOrUrl.name || '') : '') || fileNameFromUrl(url) || 'preview';
     return `/api/download-output?inline=1&url=${encodeURIComponent(url)}&name=${encodeURIComponent(filename)}`;
 }
 function displayMediaUrl(itemOrUrl, name=''){
-    const url = typeof itemOrUrl === 'string' ? itemOrUrl : (itemOrUrl?.url || '');
+    const url = smartOriginalMediaUrl(itemOrUrl);
     if(/^https?:\/\//i.test(String(url || ''))) return proxiedMediaUrl(itemOrUrl, name);
     return url;
 }
@@ -9205,6 +9270,7 @@ function positionComposerForNode(node){
 }
 function updateComposer(){
     const node = selectedNode();
+    syncRunButtonState(node);
     if(smartCascadeSilentSelection && !activeComposerSubject){
         composer.classList.remove('open');
         if(cascadeRunBtn) cascadeRunBtn.style.display = 'none';
@@ -9727,7 +9793,10 @@ async function handleSmartImageDropPayload(payload, targetId='', opts={}){
     }
 }
 function sizeForRun(sourceSettings=settings){
-    return apiImageSize(sourceSettings.ratio || 'square', sourceSettings.resolution || '1k', sourceSettings.customRatio || '', sourceSettings.customSize || '') || '1024x1024';
+    const fallbackResolution = sourceSettings.engine === 'api' && isGptImageAutoSizeModel(sourceSettings.model)
+        ? 'auto'
+        : '1k';
+    return apiImageSize(sourceSettings.ratio || 'square', sourceSettings.resolution || fallbackResolution, sourceSettings.customRatio || '', sourceSettings.customSize || '') || '1024x1024';
 }
 function expectedOutputSize(){
     if(settings.engine === 'comfy'){
@@ -10546,9 +10615,15 @@ function collectPromptParts(){
             parts.push({type:'image', kind, url:node.dataset.url || '', name:node.dataset.name || (kind === 'audio' ? '音频' : '图片'), nodeId:node.dataset.nodeId || '', imageIndex:Number(node.dataset.imageIndex || 0), asset_uris:assetUris});
             return;
         }
-        if(node.tagName === 'BR') parts.push({type:'text', text:'\n'});
+        if(node.tagName === 'BR'){
+            parts.push({type:'text', text:'\n'});
+            return;
+        }
+        const blockTags = new Set(['DIV','P','LI','SECTION','ARTICLE','HEADER','FOOTER','BLOCKQUOTE']);
+        const isBlock = node !== promptInput && blockTags.has(node.tagName);
+        if(isBlock && parts.length && parts[parts.length - 1]?.text && !/\n$/.test(parts[parts.length - 1].text)) parts.push({type:'text', text:'\n'});
         node.childNodes.forEach(walk);
-        if(node !== promptInput && ['DIV','P'].includes(node.tagName)) parts.push({type:'text', text:'\n'});
+        if(isBlock) parts.push({type:'text', text:'\n'});
     };
     promptInput.childNodes.forEach(walk);
     return parts;
@@ -11146,9 +11221,9 @@ function cascadeConnectionKeys(){
 function coolRunButton(ms=2000){
     if(!runBtn) return 0;
     const token = ++runBtnCooldownToken;
-    runBtn.disabled = true;
+    syncRunButtonState();
     setTimeout(() => {
-        if(token === runBtnCooldownToken && !smartCascadeAnyRunning()) runBtn.disabled = false;
+        if(token === runBtnCooldownToken) syncRunButtonState();
     }, ms);
     return token;
 }
@@ -11365,6 +11440,50 @@ function loadNodePromptDraftToInput(node){
         else setPromptText(node?.runPrompt || '');
     }
 }
+async function createSmartComfyTask(payload){
+    const res = await fetch('/api/canvas-comfy-tasks', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(payload)
+    });
+    if(!res.ok) throw new Error(await smartResponseErrorMessage(res, tr('smart.errRunFailed')));
+    return res.json();
+}
+async function waitSmartComfyTaskResult(taskId){
+    if(!taskId) throw new Error(tr('smart.errRunFailed'));
+    while(true){
+        const res = await fetch(`/api/canvas-comfy-tasks/${encodeURIComponent(taskId)}`);
+        if(!res.ok) throw new Error(await smartResponseErrorMessage(res, tr('smart.errRunFailed')));
+        const data = await res.json();
+        if(data.status === 'succeeded') return data.result || {};
+        if(data.status === 'failed') throw new Error(data.error || tr('smart.errRunFailed'));
+        await sleep(1600);
+    }
+}
+async function runQueuedSmartComfyGenerate(payload){
+    const task = await createSmartComfyTask(payload);
+    return waitSmartComfyTaskResult(task.task_id);
+}
+function comfyParamsFromWorkflowValues(config, values={}){
+    const params = {};
+    (config?.fields || []).forEach(field => {
+        if(!field?.node || !field?.input) return;
+        let value = values[field.id];
+        if(value === undefined) value = field.default;
+        if(field.type === 'number' || field.type === 'slider'){
+            const n = Number(value);
+            if(Number.isFinite(n)) value = field.step && Number(field.step) < 1 ? n : Math.round(n);
+        } else if(field.type === 'boolean'){
+            value = Boolean(value);
+        } else if(field.type === 'dropdown' && typeof value === 'string'){
+            const s = value.trim();
+            if(s && /^-?\d+(?:\.\d+)?(?:e-?\d+)?$/i.test(s)) value = s.includes('.') || /e/i.test(s) ? Number(s) : parseInt(s, 10);
+        }
+        params[field.node] = params[field.node] || {};
+        params[field.node][field.input] = value;
+    });
+    return params;
+}
 function buildPromptRequestForNode(node, defaultImages, ctx=smartLoopContext){
     const oldHtml = promptInput.innerHTML;
     loadNodePromptDraftToInput(node);
@@ -11377,77 +11496,6 @@ function buildPromptRequestForNode(node, defaultImages, ctx=smartLoopContext){
 async function generateUrlsForCurrentSettings(node, prompt, refs, runSettings=settings){
     const activeSettings = runSettings || settings;
     if(activeSettings.engine === 'comfy') return generateComfyUrlsWithSettings(activeSettings, prompt, refs);
-    if(activeSettings.engine === 'comfy'){
-        const allRefs = refs || [];
-        const imageRefs = imageRefsOnly(allRefs);
-        const mode = settings.comfyMode || 'text';
-        if(mode === 'text'){
-            const data = await fetch('/api/generate', {
-                method:'POST',
-                headers:{'Content-Type':'application/json'},
-                body:JSON.stringify({prompt, width:Number(settings.width || 1024), height:Number(settings.height || 1024), workflow_json:'Z-Image.json', type:'zimage'})
-            }).then(async r => { if(!r.ok) throw new Error(await r.text()); return r.json(); });
-            const urls = resultMediaUrls(data);
-            return {urls, kind:mediaKindForUrls(urls, 'image')};
-        }
-        if(mode === 'enhance'){
-            if(!imageRefs.length) throw new Error(tr('smart.errEnhanceNeedRefs'));
-            const inputName = await comfyNameForRef(imageRefs[0]);
-            const data = await fetch('/api/generate', {
-                method:'POST',
-                headers:{'Content-Type':'application/json'},
-                body:JSON.stringify({workflow_json:'Z-Image-Enhance.json', type:'enhance', params:{"15":{image:inputName},"204":{value:Number(settings.enhanceStrength ?? 0.5)}}})
-            }).then(async r => { if(!r.ok) throw new Error(await r.text()); return r.json(); });
-            const urls = resultMediaUrls(data);
-            return {urls, kind:mediaKindForUrls(urls, 'image')};
-        }
-        if(mode === 'edit'){
-            if(!imageRefs.length) throw new Error(tr('smart.errEditNeedRefs'));
-            const names = [];
-            for(const ref of imageRefs.slice(0, 3)) names.push(await comfyNameForRef(ref));
-            const data = await fetch('/api/generate', {
-                method:'POST',
-                headers:{'Content-Type':'application/json'},
-                body:JSON.stringify({prompt, workflow_json:'Flux2-Klein.json', type:'klein', params:{"168":{text:prompt},"158":{noise_seed:Math.floor(Math.random()*1000000)},"278":{image:names[0] || ""},"270":{image:names[1] || ""},"292":{image:names[2] || ""},"313":{value:Boolean(names[1])},"314":{value:Boolean(names[2])}}})
-            }).then(async r => { if(!r.ok) throw new Error(await r.text()); return r.json(); });
-            const urls = resultMediaUrls(data);
-            return {urls, kind:mediaKindForUrls(urls, 'image')};
-        }
-        const workflowName = settings.comfyWorkflow || comfyWorkflows[0]?.name || '';
-        if(!workflowName) throw new Error(tr('smart.errNeedWorkflow'));
-        const wf = await fetch(`/api/workflows/${encodeURIComponent(workflowName)}`).then(async r => {
-            if(!r.ok) throw new Error(await r.text());
-            return r.json();
-        });
-        const fields = wf.config?.fields || [];
-        const values = {};
-        fields.filter(f => comfyFieldKind(f) === 'prompt').forEach((field, index) => {
-            values[field.id] = index === 0 ? prompt : (field.default ?? '');
-        });
-        const assignMediaFields = async (mediaFields, mediaRefs) => {
-            for(let i = 0; i < mediaFields.length && i < mediaRefs.length; i++){
-                values[mediaFields[i].id] = await comfyNameForRef(mediaRefs[i]);
-            }
-        };
-        await assignMediaFields(fields.filter(f => comfyFieldKind(f) === 'image'), imageRefs);
-        await assignMediaFields(fields.filter(f => comfyFieldKind(f) === 'video'), videoRefsOnly(allRefs));
-        await assignMediaFields(fields.filter(f => comfyFieldKind(f) === 'audio'), audioRefsOnly(allRefs));
-        fields.filter(f => comfyFieldKind(f) === 'setting').forEach(field => {
-            if(comfyRandomEnabledField(field) && smartComfyRandomActive(field.id)){
-                values[field.id] = smartComfyRandomValue(field);
-            } else {
-                values[field.id] = settings.comfyParams?.[field.id] ?? field.default;
-            }
-        });
-        const result = await fetch(`/api/workflows/${encodeURIComponent(workflowName)}/run`, {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({config:wf.config || {fields:[]}, fields:values})
-        }).then(async r => { if(!r.ok) throw new Error(await r.text()); return r.json(); });
-        const urls = resultMediaUrls(result);
-        const fallbackKind = result.videos?.length ? 'video' : result.audios?.length ? 'audio' : result.texts?.length ? 'text' : 'image';
-        return {urls, kind:mediaKindForUrls(urls, fallbackKind)};
-    }
     if(isApiLikeEngine(activeSettings.engine) && activeSettings.apiKind === 'video'){
         return {urls:await runApiVideoGeneration(prompt, refs, activeSettings), kind:'video'};
     }
@@ -11474,22 +11522,14 @@ async function generateComfyUrlsWithSettings(runSettings, prompt, refs){
     const imageRefs = imageRefsOnly(allRefs);
     const mode = runSettings.comfyMode || 'text';
     if(mode === 'text'){
-        const data = await fetch('/api/generate', {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({prompt, width:Number(runSettings.width || 1024), height:Number(runSettings.height || 1024), workflow_json:'Z-Image.json', type:'zimage'})
-        }).then(async r => { if(!r.ok) throw new Error(await r.text()); return r.json(); });
+        const data = await runQueuedSmartComfyGenerate({prompt, width:Number(runSettings.width || 1024), height:Number(runSettings.height || 1024), workflow_json:'Z-Image.json', type:'zimage', client_id:smartClientId});
         const urls = resultMediaUrls(data);
         return {urls, kind:mediaKindForUrls(urls, 'image')};
     }
     if(mode === 'enhance'){
         if(!imageRefs.length) throw new Error(tr('smart.errEnhanceNeedRefs'));
         const inputName = await comfyNameForRef(imageRefs[0]);
-        const data = await fetch('/api/generate', {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({workflow_json:'Z-Image-Enhance.json', type:'enhance', params:{"15":{image:inputName},"204":{value:Number(runSettings.enhanceStrength ?? 0.5)}}})
-        }).then(async r => { if(!r.ok) throw new Error(await r.text()); return r.json(); });
+        const data = await runQueuedSmartComfyGenerate({workflow_json:'Z-Image-Enhance.json', type:'enhance', params:{"15":{image:inputName},"204":{value:Number(runSettings.enhanceStrength ?? 0.5)}}, client_id:smartClientId});
         const urls = resultMediaUrls(data);
         return {urls, kind:mediaKindForUrls(urls, 'image')};
     }
@@ -11497,11 +11537,7 @@ async function generateComfyUrlsWithSettings(runSettings, prompt, refs){
         if(!imageRefs.length) throw new Error(tr('smart.errEditNeedRefs'));
         const names = [];
         for(const ref of imageRefs.slice(0, 3)) names.push(await comfyNameForRef(ref));
-        const data = await fetch('/api/generate', {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({prompt, workflow_json:'Flux2-Klein.json', type:'klein', params:{"168":{text:prompt},"158":{noise_seed:Math.floor(Math.random()*1000000)},"278":{image:names[0] || ""},"270":{image:names[1] || ""},"292":{image:names[2] || ""},"313":{value:Boolean(names[1])},"314":{value:Boolean(names[2])}}})
-        }).then(async r => { if(!r.ok) throw new Error(await r.text()); return r.json(); });
+        const data = await runQueuedSmartComfyGenerate({prompt, workflow_json:'Flux2-Klein.json', type:'klein', params:{"168":{text:prompt},"158":{noise_seed:Math.floor(Math.random()*1000000)},"278":{image:names[0] || ""},"270":{image:names[1] || ""},"292":{image:names[2] || ""},"313":{value:Boolean(names[1])},"314":{value:Boolean(names[2])}}, client_id:smartClientId});
         const urls = resultMediaUrls(data);
         return {urls, kind:mediaKindForUrls(urls, 'image')};
     }
@@ -11531,11 +11567,7 @@ async function generateComfyUrlsWithSettings(runSettings, prompt, refs){
             values[field.id] = runSettings.comfyParams?.[field.id] ?? field.default;
         }
     });
-    const result = await fetch(`/api/workflows/${encodeURIComponent(workflowName)}/run`, {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({config:wf.config || {fields:[]}, fields:values})
-    }).then(async r => { if(!r.ok) throw new Error(await r.text()); return r.json(); });
+    const result = await runQueuedSmartComfyGenerate({prompt, workflow_json:workflowName, params:comfyParamsFromWorkflowValues(wf.config || {fields:[]}, values), type:'workflow-custom', client_id:smartClientId});
     const urls = resultMediaUrls(result);
     const fallbackKind = result.videos?.length ? 'video' : result.audios?.length ? 'audio' : result.texts?.length ? 'text' : 'image';
     return {urls, kind:mediaKindForUrls(urls, fallbackKind)};
@@ -12021,7 +12053,7 @@ async function runSmartCascade(targetNode=null){
         smartCascadeRuns.delete(runKey);
         syncSmartCascadeLegacyState();
         smartCascadeSilentSelection = false;
-        runBtn.disabled = smartCascadeAnyRunning();
+        syncRunButtonState();
         cascadeRunBtn.disabled = false;
         if(directLoopTargetRun) finishLoopTargetPreviewState(tail);
         scheduleSave();
@@ -12043,6 +12075,7 @@ async function runGeneration(){
     const request = buildPromptRequest(node, null, true, smartLoopContext);
     const prompt = request.prompt.trim();
     if(!node) return;
+    if(smartNodeInFlight(node)) return;
     const refs = request.refs;
     const previousSettings = cloneSmartSettings(settings);
     const runSettings = smartSettingsForNode(node);
@@ -12075,7 +12108,7 @@ async function runGeneration(){
         : settings.engine === 'comfy'
         ? (settings.comfyMode === 'text' || settings.comfyMode === 'enhance' || settings.comfyMode === 'edit' || settings.comfyMode === 'custom' ? 1 : 1)
         : Math.max(1, Math.min(8, Number(settings.count || 1)));
-    const apiConcurrentRun = isApiLikeEngine(settings.engine) || settings.engine === 'runninghub' || settings.engine === 'modelscope';
+    const apiConcurrentRun = isApiLikeEngine(settings.engine) || settings.engine === 'runninghub' || settings.engine === 'modelscope' || settings.engine === 'comfy';
     const nodeHasImages = (node.images || []).some(img => img?.url);
     const workflowModeRun = smartImageUsesWorkflowInput(node, smartLoopContext);
     const sourceVisualState = nodeHasImages && !workflowModeRun ? {
@@ -12108,10 +12141,10 @@ async function runGeneration(){
     }
     if(apiConcurrentRun){
         coolNodeRunningState(pendingNode, 2000);
-        coolRunButton(2000);
+        syncRunButtonState();
     } else {
         pendingNode.running = true;
-        runBtn.disabled = true;
+        syncRunButtonState();
     }
     render();
     try {
@@ -12202,7 +12235,7 @@ async function runGeneration(){
     } finally {
         if(!apiConcurrentRun){
             clearNodeRunningState(pendingNode);
-            runBtn.disabled = false;
+            syncRunButtonState();
         }
         render();
     }
@@ -12442,14 +12475,7 @@ async function runComfyGeneration(node, prompt, refs, pendingNode, meta){
             values[field.id] = settings.comfyParams?.[field.id] ?? field.default;
         }
     });
-    const result = await fetch(`/api/workflows/${encodeURIComponent(workflowName)}/run`, {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({config:wf.config || {fields:[]}, fields:values})
-    }).then(async r => {
-        if(!r.ok) throw new Error(await r.text());
-        return r.json();
-    });
+    const result = await runQueuedSmartComfyGenerate({prompt, workflow_json:workflowName, params:comfyParamsFromWorkflowValues(wf.config || {fields:[]}, values), type:'workflow-custom', client_id:smartClientId});
     const urls = resultMediaUrls(result);
     if(!urls.length) throw new Error(tr('smart.errComfyNoImages'));
     const kind = mediaKindForUrls(urls, result.videos?.length ? 'video' : result.audios?.length ? 'audio' : result.texts?.length ? 'text' : 'image');
@@ -12468,11 +12494,7 @@ async function runComfyGeneration(node, prompt, refs, pendingNode, meta){
     scheduleSave();
 }
 async function runComfyText(node, prompt, pendingNode, meta){
-    const data = await fetch('/api/generate', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({prompt, width:Number(settings.width || 1024), height:Number(settings.height || 1024), workflow_json:'Z-Image.json', type:'zimage'})
-    }).then(async r => { if(!r.ok) throw new Error(await r.text()); return r.json(); });
+    const data = await runQueuedSmartComfyGenerate({prompt, width:Number(settings.width || 1024), height:Number(settings.height || 1024), workflow_json:'Z-Image.json', type:'zimage', client_id:smartClientId});
     const out = data.outputs || data.images || [];
     if(!out.length) throw new Error(tr('smart.errComfyNoImages'));
     if(pendingNode){
@@ -12488,11 +12510,7 @@ async function runComfyText(node, prompt, pendingNode, meta){
 async function runComfyEnhance(node, refs, pendingNode, meta){
     if(!refs.length) throw new Error(tr('smart.errEnhanceNeedRefs'));
     const inputName = await comfyNameForRef(refs[0]);
-    const data = await fetch('/api/generate', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({workflow_json:'Z-Image-Enhance.json', type:'enhance', params:{"15":{image:inputName},"204":{value:Number(settings.enhanceStrength ?? 0.5)}}})
-    }).then(async r => { if(!r.ok) throw new Error(await r.text()); return r.json(); });
+    const data = await runQueuedSmartComfyGenerate({workflow_json:'Z-Image-Enhance.json', type:'enhance', params:{"15":{image:inputName},"204":{value:Number(settings.enhanceStrength ?? 0.5)}}, client_id:smartClientId});
     const out = data.outputs || data.images || [];
     if(!out.length) throw new Error(tr('smart.errComfyNoImages'));
     if(pendingNode){
@@ -12508,11 +12526,7 @@ async function runComfyEdit(node, prompt, refs, pendingNode, meta){
     if(!refs.length) throw new Error(tr('smart.errEditNeedRefs'));
     const names = [];
     for(const ref of refs.slice(0, 3)) names.push(await comfyNameForRef(ref));
-    const data = await fetch('/api/generate', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({prompt, workflow_json:'Flux2-Klein.json', type:'klein', params:{"168":{text:prompt},"158":{noise_seed:Math.floor(Math.random()*1000000)},"278":{image:names[0] || ""},"270":{image:names[1] || ""},"292":{image:names[2] || ""},"313":{value:Boolean(names[1])},"314":{value:Boolean(names[2])}}})
-    }).then(async r => { if(!r.ok) throw new Error(await r.text()); return r.json(); });
+    const data = await runQueuedSmartComfyGenerate({prompt, workflow_json:'Flux2-Klein.json', type:'klein', params:{"168":{text:prompt},"158":{noise_seed:Math.floor(Math.random()*1000000)},"278":{image:names[0] || ""},"270":{image:names[1] || ""},"292":{image:names[2] || ""},"313":{value:Boolean(names[1])},"314":{value:Boolean(names[2])}}, client_id:smartClientId});
     const out = data.outputs || data.images || [];
     if(!out.length) throw new Error(tr('smart.errComfyNoImages'));
     if(pendingNode){

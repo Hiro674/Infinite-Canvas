@@ -399,7 +399,7 @@ function normalizeRhWorkflowField(field){
     };
 }
 function normalizeFetchedRhWorkflowField(field){
-    return {...normalizeRhWorkflowField(field), enabled:false};
+    return {...normalizeRhWorkflowField(field), enabled:true};
 }
 function rhWorkflowGroupKey(field){
     return `${field?.nodeId || ''}::${field?.group || ''}`;
@@ -1421,12 +1421,26 @@ async function rhPreviewUploadValueIfNeeded(value){
 async function buildRhPreviewNodeInfoList(){
     const config = rhWorkflowEditorState.config;
     const fields = rhEditorSortedFields((config?.fields || []).filter(field => field.enabled === true));
+    const imageFields = fields.filter(field => rhWorkflowFieldKind(field) === 'IMAGE');
+    const imageSlotPreview = {};
+    const imageIndexPreview = {};
+    imageFields.forEach((field, index) => {
+        const key = rhWorkflowFieldKey(field);
+        const slot = Number(field.imageOrder) || 1;
+        const preview = rhWorkflowEditorState.previewParams[key] || {};
+        if((preview.url || preview.value) && !imageSlotPreview[slot]) imageSlotPreview[slot] = preview;
+        if((preview.url || preview.value) && !imageIndexPreview[index]) imageIndexPreview[index] = preview;
+    });
     const result = [];
     for(const field of fields){
         const key = rhWorkflowFieldKey(field);
         const kind = rhWorkflowFieldKind(field);
         if(field.sourceFromUpstream === false && !['IMAGE','VIDEO','AUDIO'].includes(kind)) continue;
-        const preview = rhWorkflowEditorState.previewParams[key] || {};
+        const ownPreview = rhWorkflowEditorState.previewParams[key] || {};
+        const imageIndex = kind === 'IMAGE' ? imageFields.findIndex(item => rhWorkflowFieldKey(item) === key) : -1;
+        const preview = kind === 'IMAGE'
+            ? (ownPreview.url || ownPreview.value ? ownPreview : (imageSlotPreview[Number(field.imageOrder) || 1] || imageIndexPreview[imageIndex] || ownPreview))
+            : ownPreview;
         let value = preview.value ?? field.fieldValue ?? '';
         if(['IMAGE','VIDEO','AUDIO'].includes(kind)){
             if(rhEditorMode === 'workflow' && kind === 'IMAGE' && field.required !== true && !preview.url) continue;
