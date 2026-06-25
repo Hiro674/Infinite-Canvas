@@ -3690,7 +3690,6 @@ def extract_images(data):
                                 "value": image_url,
                             })
 
-
     current = data
     if isinstance(current, dict) and isinstance(current.get("data"), dict) and isinstance(current["data"].get("result"), dict):
         current = current["data"]
@@ -7756,7 +7755,6 @@ def gemini_reference_part(ref):
     if isinstance(value, str) and value.startswith(("http://", "https://")):
         return {"fileData": {"mimeType": "image/png", "fileUri": value}}
     return None
-
 async def generate_gemini_provider_image(prompt, size, model, reference_images=None, provider=None):
     model_name = gemini_model_name(model)
     endpoint = gemini_endpoint_url(provider, model_name)
@@ -7769,7 +7767,6 @@ async def generate_gemini_provider_image(prompt, size, model, reference_images=N
 
     contents = []
 
-    # 不改用户提示词，不加关键词。
     # 只把每张参考图拆成独立 user content，避免部分 Gemini 中转适配器把多图 parts 混在一起理解。
     for part in ref_parts:
         contents.append({
