@@ -4863,6 +4863,18 @@ html.studio-theme-dark body .recommend-platform-card {
     grid-template-columns:1fr !important;
 }
 
+/* APIMART 等含国内/国外两个获取 Key 链接：纵向堆叠，避免在窄列中重叠 */
+.recommend-guide-key-stack {
+    grid-template-columns:1fr !important;
+    gap:6px !important;
+}
+
+.recommend-guide-key-stack .recommend-guide-key-btn {
+    min-width:0 !important;
+    width:100% !important;
+    padding:0 12px !important;
+}
+
 .recommend-guide-source {
     min-height:70px !important;
 }

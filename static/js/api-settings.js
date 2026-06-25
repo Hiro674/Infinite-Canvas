@@ -131,6 +131,7 @@ const RECOMMENDED_APIS = [
         base_url:'https://api.apimart.ai',
         protocol:'apimart',
         register_url:'https://apimart.ai/zh/register?aff=1uyAbb',
+        register_url_cn:'https://apib.ai/register?aff=1uyAbb',
         tagKeys:['api.tagImageModels','api.tagVideoModels','api.tagLlmModels'],
         icons:['IMG','VID','LLM'],
         summaryKey:'api.recommendApimartSummary',
@@ -2059,8 +2060,13 @@ function renderRecommendApi(){
                 <div class="recommend-quick-stack recommend-setup-flow">
                     <div class="recommend-guide-source onboarding-rh-source-group">
                         <div class="onboarding-rh-source-label">${escapeHtml(tr('api.getKey'))}</div>
-                        <div class="onboarding-key-actions onboarding-rh-key-actions recommend-single-action">
+                        <div class="onboarding-key-actions onboarding-rh-key-actions ${api.register_url_cn ? 'recommend-guide-key-stack' : 'recommend-single-action'}">
+                            ${api.register_url_cn ? `
+                            <a class="onboarding-key-btn recommend-guide-key-btn" href="${escapeAttr(api.register_url)}" target="_blank" rel="noopener noreferrer"><i data-lucide="key-round" class="w-3.5 h-3.5"></i><span>${escapeHtml(tr('api.getKeyGlobal'))}</span></a>
+                            <a class="onboarding-key-btn recommend-guide-key-btn" href="${escapeAttr(api.register_url_cn)}" target="_blank" rel="noopener noreferrer"><i data-lucide="key-round" class="w-3.5 h-3.5"></i><span>${escapeHtml(tr('api.getKeyCn'))}</span></a>
+                            ` : `
                             <a class="onboarding-key-btn recommend-guide-key-btn" href="${escapeAttr(api.register_url)}" target="_blank" rel="noopener noreferrer"><i data-lucide="key-round" class="w-3.5 h-3.5"></i><span>${escapeHtml(tr('api.getKey'))}</span></a>
+                            `}
                         </div>
                     </div>
                     <div class="recommend-flow-arrow onboarding-flow-arrow recommend-guide-arrow" aria-hidden="true"><span></span><b></b></div>

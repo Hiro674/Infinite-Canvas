@@ -7005,6 +7005,9 @@ function render(){
     world.classList.toggle('smart-multi-selected', selectedNodeIds().length > 1);
     const composerEl = composer;
     const mediaStates = captureMediaPlaybackStates();
+    // 用户正在提示词框(contenteditable)输入时,本次重渲染不要移动 composer:
+    // 移动 DOM 节点会打断输入法合成会话,导致输入中断(即使保留焦点描边也接不上)。
+    const promptHadFocus = document.activeElement === promptInput;
     const reusableNodes = new Map();
     world.querySelectorAll('.image-node').forEach(el => {
         const node = nodes.find(n => n.id === el.dataset.id);
@@ -7062,7 +7065,9 @@ function render(){
     [...world.childNodes].forEach(child => {
         if(!keepEls.has(child)) child.remove();
     });
-    if(composerEl) world.appendChild(composerEl);
+    // 用户正在提示词框输入时不要移动 composer:移动 DOM 会打断输入法合成、中断输入。
+    // composer 已在 keepEls 中(未被移除),不重排也不影响显示(z-index 固定)。
+    if(composerEl && !promptHadFocus) world.appendChild(composerEl);
     world.insertAdjacentHTML('beforeend', renderConnections());
     nodeHtmlEntries.forEach(entry => {
         const fresh = renderedNodeEls.get(entry.node.id);
@@ -12466,7 +12471,10 @@ function finalizePendingNode(pendingNode, urls, meta, kind='image'){
     if(metaTarget) attachRunMeta(metaTarget, meta);
     pendingNode.images = (pendingNode.images || []).map(img => stripImageGenerationMeta(img));
     clearSourceBusyStateIfDownstreamDone(nodes.find(n => n.id === meta?.sourceNodeId));
-    selectedId = pendingNode._selectAfterRunId || pendingNode.id;
+    // 生成完成不抢占选择:仅当用户仍停留在该生成节点上(或当前无选择)时才切换选择;
+    // 否则保留用户当前选择 —— 支持并发生成时去调整/编辑别的卡片,A 节点的参数栏不被打断。
+    const afterRunSelection = pendingNode._selectAfterRunId || pendingNode.id;
+    if(!selectedId || selectedId === pendingNode.id) selectedId = afterRunSelection;
     delete pendingNode._runMetaTargetId;
     delete pendingNode._selectAfterRunId;
     if(activeComposerSubject?.id && selectedId === activeComposerSubject.id) lastComposerNodeId = `${selectedId}:node`;
@@ -15807,7 +15815,9 @@ createMenu?.addEventListener('click', event => {
 composer.addEventListener('pointerdown', event => event.stopPropagation());
 composer.addEventListener('mousedown', event => event.stopPropagation());
 composer.addEventListener('click', event => {
-    if(!event.target.closest('.smart-control')) closeAllSmartPopovers();
+    // 点「生成」按钮不要收起已展开的参数栏:否则每生成一次参数栏就被收起,需重新点开。
+    // 参数控件(.smart-control)内部点击本就不关;运行按钮也排除,让参数栏熬过生成与重渲染。
+    if(!event.target.closest('.smart-control') && !event.target.closest('#runBtn') && !event.target.closest('#cascadeRunBtn')) closeAllSmartPopovers();
     event.stopPropagation();
 });
 promptInput.addEventListener('input', maybeOpenMentionPicker);

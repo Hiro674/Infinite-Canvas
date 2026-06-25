@@ -3,7 +3,7 @@
 
 
 1. API网站注册：
-https://apimart.ai/register?aff=1uyAbb
+https://apimart.ai/zh/register?aff=1uyAbb
 （国内：https://apib.ai/register?aff=1uyAbb）
 
 2.如果没有网盘会员，就下载网盘中的非会员压缩包版本，现在直接点击运行bat就可以启动了，不需要做更多的设置，手动更新到最新版就可以了。
