@@ -526,6 +526,15 @@ LLM_MESSAGE_MAX_LENGTH = int(os.getenv("LLM_MESSAGE_MAX_LENGTH", "20000"))
 CHAT_ATTACHMENT_MAX = int(os.getenv("CHAT_ATTACHMENT_MAX", "20"))
 ONLINE_IMAGE_REFERENCE_MAX = int(os.getenv("ONLINE_IMAGE_REFERENCE_MAX", "20"))
 
+# ("GEMINI_SPLIT_CONTENTS", "0")不启用新 Gemini 拆分传图方式
+#     {"role": "user", "parts": [文本, 图1, 图2, ...]}
+# ("GEMINI_SPLIT_CONTENTS", "1")启用新的 Gemini 拆分传图方式
+#     {"role": "user", "parts": [图1]},
+#     {"role": "user", "parts": [图2]},
+#     {"role": "user", "parts": [图...]},
+#     {"role": "user", "parts": [{"text": prompt}]},
+GEMINI_SPLIT_CONTENTS = os.getenv("GEMINI_SPLIT_CONTENTS", "1") == "1"
+
 FIELD_LABELS = {
     "prompt": "提示词",
     "message": "文本",
@@ -3801,7 +3810,6 @@ def extract_task_id(data):
     for key in (
         "task_id", "taskId", "taskID",
         "job_id", "jobId",
-        "request_id", "requestId",
         "generation_id", "generationId",
     ):
         value = data.get(key)
@@ -3907,18 +3915,15 @@ def async_image_payload_variants(prompt, size, quality, model, image_refs=None, 
         openai_image_urls["image_urls"] = image_values
     variants.append(("openai-json-image_urls", openai_image_urls))
 
-    # 3) APIMart 风格：保留你原来能用的那套
+    # 3) APIMart 风格：保留原来能用的那套
     apimart_body = {
         "model": model,
         "prompt": prompt,
         "n": 1,
         "size": aspect_ratio,
         "resolution": resolution,
-        "response_format": "url",
         "official_fallback": False,
     }
-    if q:
-        apimart_body["quality"] = q
     if image_values:
         apimart_body["image_urls"] = image_values
     variants.append(("apimart", apimart_body))
@@ -7765,19 +7770,24 @@ async def generate_gemini_provider_image(prompt, size, model, reference_images=N
         if part:
             ref_parts.append(part)
 
-    contents = []
-
-    # 只把每张参考图拆成独立 user content，避免部分 Gemini 中转适配器把多图 parts 混在一起理解。
-    for part in ref_parts:
+    if GEMINI_SPLIT_CONTENTS:
+        # 每张参考图拆成独立 user content。
+        contents = []
+        for part in ref_parts:
+            contents.append({
+                "role": "user",
+                "parts": [part],
+            })
         contents.append({
             "role": "user",
-            "parts": [part],
+            "parts": [{"text": prompt.strip()}],
         })
-
-    contents.append({
-        "role": "user",
-        "parts": [{"text": prompt.strip()}],
-    })
+    else:
+        # 保持原来的 Gemini 传入结构，不改变原功能。
+        parts = [{"text": prompt.strip()}]
+        for part in ref_parts:
+            parts.append(part)
+        contents = [{"role": "user", "parts": parts}]
 
     body = {
         "contents": contents,
@@ -7788,14 +7798,59 @@ async def generate_gemini_provider_image(prompt, size, model, reference_images=N
     }
 
     print(
-        f"[gemini-image] contents={len(contents)} refs={len(ref_parts)} "
+        f"[gemini-image] split_contents={GEMINI_SPLIT_CONTENTS} "
+        f"contents={len(contents)} refs={len(ref_parts)} "
         f"prompt_len={len(str(prompt or ''))} size={size} model={model}"
     )
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0)) as client:
         response = await client.post(endpoint, headers=api_headers(provider=provider), json=body)
-        response.raise_for_status()
-        raw = response.json()
+
+        raw = None
+        try:
+            raw = response.json()
+        except Exception:
+            raw = None
+
+        if response.status_code >= 400:
+            task_id = extract_task_id(raw) if isinstance(raw, dict) else ""
+            if not task_id:
+                task_id = extract_task_id_from_text(response.text)
+
+            # 有些上游虽然 HTTP 状态码是 4xx/5xx，但 body 里实际已经带了图片，先尝试解析。
+            if isinstance(raw, dict):
+                try:
+                    return extract_image(raw), raw
+                except Exception:
+                    pass
+
+                # 如果错误体里带 task_id，尝试按异步任务再查一次。
+                if task_id:
+                    try:
+                        task_raw = await wait_for_image_task(client, task_id, provider)
+                        return extract_image(task_raw), task_raw
+                    except Exception as exc:
+                        print(f"[gemini-image] HTTP {response.status_code} 后尝试查询任务失败 task_id={task_id}: {exc}")
+
+            raw_preview = json.dumps(raw, ensure_ascii=False)[:1000] if isinstance(raw, dict) else (response.text or "")[:1000]
+            print(f"[gemini-image] HTTP错误 status={response.status_code} raw={raw_preview}")
+
+            if response.status_code == 504:
+                raise HTTPException(
+                    status_code=504,
+                    detail=(
+                        "Gemini 上游同步生图等待超时。上游后台可能仍会继续生成成功，"
+                        "但本次 HTTP 返回没有直接图片结果"
+                        + (f"，任务 ID：{task_id}" if task_id else "，也没有返回可查询的 task_id")
+                        + f"。原始返回：{raw_preview[:500]}"
+                    )
+                )
+
+            response.raise_for_status()
+
+        if raw is None:
+            raise HTTPException(status_code=502, detail=f"Gemini 生图接口返回非 JSON 响应：{(response.text or '')[:500]}")
+
         try:
             return extract_image(raw), raw
         except Exception:
